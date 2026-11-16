@@ -73,6 +73,11 @@
     .eyebrow { color: var(--accent); font-size: 10px; font-weight: 750; letter-spacing: 2.2px; margin: 9px 0 7px; }
     h1 { font-size: clamp(29px, 7vw, 36px); letter-spacing: -1.5px; line-height: 1.16; margin: 0 0 10px; font-weight: 750; }
     .panel { padding: 25px; background: var(--surface); border: 1px solid var(--line); border-radius: 20px; box-shadow: var(--shadow); }
+    .storage-notice { margin: 0 0 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--option); }
+    .resume-copy { color: var(--muted); margin: 0; }
+    .resume-actions { display: flex; gap: 10px; }
+    .resume-actions .next { flex: 1; }
+    .resume-actions .secondary { background: var(--soft); color: var(--text); }
     .stats { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; }
     .question-count { font-weight: 650; }
     .question-count span { color: var(--muted); font-weight: 400; }
@@ -175,6 +180,15 @@
       </dl>
     </section>
 
+    <p id="storage-notice" class="storage-notice" role="status" aria-live="polite" hidden></p>
+    <section id="resume-prompt" class="panel" aria-labelledby="resume-title" hidden>
+      <h2 id="resume-title" tabindex="-1">Continue your mission?</h2>
+      <p class="resume-copy">You have an unfinished quiz saved on this device.</p>
+      <div class="resume-actions">
+        <button id="resume" class="next" type="button">Resume quiz</button>
+        <button id="start-over" class="next secondary" type="button">Start over</button>
+      </div>
+    </section>
     <section id="quiz" class="panel" aria-label="Space exploration quiz">
       <div class="stats">
         <div class="question-count" id="question-count">Question 01 <span>/ 10</span></div>
@@ -221,13 +235,78 @@
       { category: "The final frontier", question: "About how long does sunlight take to reach Earth?", answers: ["8 minutes", "1 second", "1 hour", "24 hours"], correct: 0, fact: "Sunlight travels roughly 150 million kilometers to Earth in about 8 minutes and 20 seconds." }
     ];
     const $ = (id) => document.getElementById(id);
+    const storageKey = "orbit-quiz-progress";
+    const quizSignature = JSON.stringify(questions);
     let current = 0;
     let score = 0;
     let answered = false;
+    let selections = [];
+
+    function storageNotice(message) {
+      $("storage-notice").hidden = false;
+      $("storage-notice").textContent = message;
+    }
+
+    function clearSavedProgress() {
+      try {
+        localStorage.removeItem(storageKey);
+        return true;
+      } catch (error) {
+        storageNotice("Progress could not be cleared on this device. A previous attempt may reappear.");
+        return false;
+      }
+    }
+
+    function saveProgress() {
+      try {
+        localStorage.setItem(storageKey, JSON.stringify({
+          version: 1, quiz: quizSignature, current, selections
+        }));
+      } catch (error) {
+        const cleared = clearSavedProgress();
+        storageNotice(cleared
+          ? "Progress could not be saved on this device. You can still play, but may not be able to resume."
+          : "Progress could not be saved or cleared on this device. You can still play, but an older attempt may reappear.");
+      }
+    }
+
+    function loadProgress() {
+      let raw;
+      try {
+        raw = localStorage.getItem(storageKey);
+      } catch (error) {
+        storageNotice("Progress could not be restored or saved on this device. You can still play.");
+        return null;
+      }
+      if (raw === null) return null;
+      let saved;
+      try {
+        saved = JSON.parse(raw);
+      } catch (error) {
+        saved = null;
+      }
+      if (!saved || saved.version !== 1 || saved.quiz !== quizSignature ||
+          !Number.isInteger(saved.current) || saved.current < 0 || saved.current >= questions.length ||
+          !Array.isArray(saved.selections) ||
+          saved.selections.length === 0 ||
+          (saved.selections.length !== saved.current && saved.selections.length !== saved.current + 1) ||
+          !saved.selections.every((selection, index) =>
+            Number.isInteger(selection) && selection >= 0 && selection < questions[index].answers.length)) {
+        const cleared = clearSavedProgress();
+        storageNotice(cleared
+          ? "Saved progress could not be restored. Starting a fresh quiz."
+          : "Saved progress could not be restored or cleared. Starting a fresh quiz, but it may reappear.");
+        return null;
+      }
+      return saved;
+    }
 
     function renderQuestion(focus = false) {
       const item = questions[current];
       answered = false;
+      $("score").textContent = `${score} ${score === 1 ? "point" : "points"}`;
+      $("progress-fill").style.width = `${(current / questions.length) * 100}%`;
+      $("progress").setAttribute("aria-valuenow", current);
       $("question-count").innerHTML = `Question ${String(current + 1).padStart(2, "0")} <span>/ ${questions.length}</span>`;
       $("category").textContent = item.category;
       $("question").textContent = item.question;
@@ -250,15 +329,22 @@
         button.addEventListener("click", () => chooseAnswer(index));
         return button;
       }));
+      if (selections[current] !== undefined) showAnswer(selections[current], false);
       if (focus) $("question").focus();
     }
 
     function chooseAnswer(selected) {
       if (answered) return;
+      selections[current] = selected;
+      if (selected === questions[current].correct) score++;
+      showAnswer(selected, true);
+      saveProgress();
+    }
+
+    function showAnswer(selected, focus) {
       answered = true;
       const item = questions[current];
       const correct = selected === item.correct;
-      if (correct) score++;
       $("score").textContent = `${score} ${score === 1 ? "point" : "points"}`;
       Array.from($("answers").children).forEach((button, index) => {
         button.disabled = true;
@@ -270,7 +356,7 @@
           mark.textContent = isCorrect ? "\u2713" : "\u00d7";
           mark.setAttribute("aria-hidden", "true");
           button.append(mark);
-          button.setAttribute("aria-label", `${item.answers[index]}: ${isCorrect ? "correct answer" : "your answer, incorrect"}`);
+          button.setAttribute("aria-label", `${item.answers[index]}: ${index === selected ? `your answer, ${isCorrect ? "correct" : "incorrect"}` : "correct answer"}`);
         }
       });
       $("progress-fill").style.width = `${((current + 1) / questions.length) * 100}%`;
@@ -283,10 +369,11 @@
       $("feedback").hidden = false;
       $("feedback").append(heading, explanation);
       $("next").disabled = false;
-      $("next").focus({ preventScroll: true });
+      if (focus) $("next").focus({ preventScroll: true });
     }
 
     function showResults() {
+      clearSavedProgress();
       $("quiz").hidden = true;
       $("results").hidden = false;
       const reaction = score >= 8
@@ -318,11 +405,26 @@
     $("next").addEventListener("click", () => {
       if (!answered) return;
       if (current === questions.length - 1) showResults();
-      else { current++; renderQuestion(true); }
+      else { current++; renderQuestion(true); saveProgress(); }
+    });
+    $("resume").addEventListener("click", () => {
+      $("resume-prompt").hidden = true;
+      $("quiz").hidden = false;
+      renderQuestion(true);
+    });
+    $("start-over").addEventListener("click", () => {
+      clearSavedProgress();
+      current = 0;
+      score = 0;
+      selections = [];
+      $("resume-prompt").hidden = true;
+      $("quiz").hidden = false;
+      renderQuestion(true);
     });
     $("restart").addEventListener("click", () => {
       current = 0;
       score = 0;
+      selections = [];
       $("score").textContent = "0 points";
       $("progress-fill").style.width = "0%";
       $("progress").setAttribute("aria-valuenow", "0");
@@ -338,7 +440,18 @@
         chooseAnswer(Number(event.key) - 1);
       }
     });
-    renderQuestion();
+    const saved = loadProgress();
+    if (saved) {
+      current = saved.current;
+      selections = saved.selections;
+      score = selections.reduce((total, selection, index) =>
+        total + (selection === questions[index].correct ? 1 : 0), 0);
+      $("quiz").hidden = true;
+      $("resume-prompt").hidden = false;
+      $("resume-title").focus();
+    } else {
+      renderQuestion();
+    }
   </script>
 </body>
 </html>
