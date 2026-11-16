@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Quiz resume tests</title>
+</head>
+<body>
+  <h1>Quiz resume tests</h1>
+  <p id="summary" role="status">Running...</p>
+  <ul id="results"></ul>
+  <script>
+    "use strict";
+    const key = "orbit-quiz-progress";
+    const originalProgress = localStorage.getItem(key);
+    let frame;
+
+    function assert(condition, message) {
+      if (!condition) throw new Error(message);
+    }
+
+    async function openQuiz(injection = "") {
+      if (frame) frame.remove();
+      frame = document.createElement("iframe");
+      frame.title = "Quiz under test";
+      frame.style.cssText = "position:absolute;left:-10000px;width:800px;height:800px";
+      const loaded = new Promise((resolve) => frame.addEventListener("load", resolve, { once: true }));
+      frame.srcdoc = source.replace("<script>", `<script>${injection}<\/script><script>`);
+      document.body.append(frame);
+      await loaded;
+      return frame.contentDocument;
+    }
+
+    function click(doc, selector) {
+      const element = doc.querySelector(selector);
+      assert(element && !element.disabled, `Cannot click ${selector}`);
+      element.click();
+    }
+
+    async function test(name, run) {
+      const result = document.createElement("li");
+      try {
+        localStorage.removeItem(key);
+        await run();
+        result.textContent = `PASS: ${name}`;
+      } catch (error) {
+        result.textContent = `FAIL: ${name}: ${error.message}`;
+        failures++;
+      }
+      document.querySelector("#results").append(result);
+    }
+
+    let source;
+    let failures = 0;
+    async function runTests() {
+      const response = await fetch("../index.html");
+      if (!response.ok) throw new Error(`Could not load quiz: ${response.status}`);
+      source = await response.text();
+
+      await test("Resume answered and unanswered questions without duplicate points; completion clears progress", async () => {
+        let doc = await openQuiz();
+        click(doc, ".answer:nth-child(2)");
+        assert(doc.querySelector("#score").textContent === "1 point", "Correct answer was not scored");
+        assert(JSON.parse(localStorage.getItem(key)).selections[0] === 1, "Answer was not saved");
+        doc = await openQuiz();
+        assert(!doc.querySelector("#resume-prompt").hidden && doc.querySelector("#quiz").hidden, "Resume choice was not shown");
+        assert(doc.activeElement.id === "resume-title", "Resume prompt did not receive focus");
+        doc.dispatchEvent(new frame.contentWindow.KeyboardEvent("keydown", { key: "1", bubbles: true }));
+        assert(JSON.parse(localStorage.getItem(key)).selections.length === 1, "Shortcut answered behind the prompt");
+        doc.querySelector("#resume").focus();
+        assert(doc.activeElement.id === "resume", "Resume choice is not keyboard focusable");
+        click(doc, "#resume");
+        assert(doc.querySelector("#score").textContent === "1 point", "Score was not restored");
+        assert(doc.querySelector("#progress").getAttribute("aria-valuenow") === "1", "Answered progress was not restored");
+        assert(doc.querySelector(".answer:nth-child(2)").classList.contains("correct"), "Selected answer was not restored");
+        assert(doc.querySelector("#feedback").textContent.includes("Stellar work!"), "Feedback was not restored");
+        doc.querySelector(".answer:nth-child(2)").click();
+        assert(doc.querySelector("#score").textContent === "1 point", "Restored answer earned points twice");
+        click(doc, "#next");
+        assert(JSON.parse(localStorage.getItem(key)).current === 1, "Next question was not saved");
+        doc = await openQuiz();
+        click(doc, "#resume");
+        assert(doc.querySelector("#question-count").textContent.includes("02"), "Current question was not restored");
+        assert(doc.querySelector("#progress").getAttribute("aria-valuenow") === "1", "Unanswered progress was not restored");
+        assert(!doc.querySelector(".answer").disabled && doc.querySelector("#next").disabled, "Question should be unanswered");
+        click(doc, ".answer:nth-child(1)");
+        doc = await openQuiz();
+        click(doc, "#resume");
+        assert(doc.querySelector(".answer:nth-child(1)").classList.contains("wrong"), "Wrong selection was not restored");
+        assert(doc.querySelector("#feedback").textContent.includes("Correct answer: Neil Armstrong"), "Wrong-answer feedback was not restored");
+        assert(doc.querySelector("#score").textContent === "1 point", "Wrong answer changed the score");
+        click(doc, "#next");
+        for (let question = 2; question < 10; question++) {
+          click(doc, ".answer:nth-child(1)");
+          if (question === 9) {
+            doc = await openQuiz();
+            click(doc, "#resume");
+            assert(doc.querySelector("#progress").getAttribute("aria-valuenow") === "10", "Last answered question was not restored");
+            assert(doc.querySelector("#next-label").textContent === "See my results", "Results action was not restored");
+          }
+          click(doc, "#next");
+        }
+        assert(!doc.querySelector("#results").hidden && localStorage.getItem(key) === null, "Completion did not clear progress");
+        doc = await openQuiz();
+        assert(doc.querySelector("#resume-prompt").hidden && !doc.querySelector("#quiz").hidden, "Completed quiz prompted to resume");
+      });
+
+      await test("Start over clears the unfinished attempt", async () => {
+        let doc = await openQuiz();
+        click(doc, ".answer:nth-child(2)");
+        doc = await openQuiz();
+        doc.querySelector("#start-over").focus();
+        assert(doc.activeElement.id === "start-over", "Start-over choice is not keyboard focusable");
+        click(doc, "#start-over");
+        assert(localStorage.getItem(key) === null, "Start over did not clear progress");
+        assert(doc.querySelector("#score").textContent === "0 points" && !doc.querySelector(".answer").disabled, "Start over did not reset the quiz");
+        doc = await openQuiz();
+        assert(doc.querySelector("#resume-prompt").hidden, "Cleared attempt reappeared");
+      });
+
+      await test("Invalid or incompatible saved data is discarded", async () => {
+        let doc = await openQuiz();
+        click(doc, ".answer:nth-child(2)");
+        const valid = JSON.parse(localStorage.getItem(key));
+        for (const bad of ["{", JSON.stringify({ ...valid, selections: [99] }), JSON.stringify({ ...valid, quiz: "different" })]) {
+          localStorage.setItem(key, bad);
+          doc = await openQuiz();
+          assert(doc.querySelector("#resume-prompt").hidden && !doc.querySelector("#quiz").hidden, "Invalid progress offered for resume");
+          assert(!doc.querySelector("#storage-notice").hidden && doc.querySelector("#storage-notice").textContent.includes("could not be restored"), "Invalid progress warning missing");
+          assert(localStorage.getItem(key) === null, "Invalid progress not cleared");
+          click(doc, ".answer:nth-child(1)");
+        }
+      });
+
+      await test("Unavailable storage leaves the quiz playable and reports the failure", async () => {
+        const doc = await openQuiz(`Object.defineProperty(window, "localStorage", { value: {
+          getItem() { throw new Error("blocked"); },
+          setItem() { throw new Error("blocked"); },
+          removeItem() { throw new Error("blocked"); }
+        } });`);
+        assert(!doc.querySelector("#storage-notice").hidden && doc.querySelector("#storage-notice").textContent.includes("could not be restored"), "Read failure warning missing");
+        click(doc, ".answer:nth-child(2)");
+        assert(doc.querySelector("#score").textContent === "1 point" && !doc.querySelector("#next").disabled, "Storage failure prevented play");
+        assert(doc.querySelector("#storage-notice").textContent.includes("could not be saved"), "Write failure warning missing");
+        click(doc, "#next");
+        assert(doc.querySelector("#question-count").textContent.includes("02"), "Storage failure prevented advancing");
+      });
+
+      await test("Failed writes discard stale progress when possible", async () => {
+        let doc = await openQuiz();
+        click(doc, ".answer:nth-child(2)");
+        doc = await openQuiz(`const realStorage = window.localStorage;
+          Object.defineProperty(window, "localStorage", { value: {
+            getItem: realStorage.getItem.bind(realStorage),
+            setItem() { throw new Error("quota"); },
+            removeItem: realStorage.removeItem.bind(realStorage)
+          } });`);
+        click(doc, "#resume");
+        click(doc, "#next");
+        assert(localStorage.getItem(key) === null, "Stale progress survived a failed write");
+        assert(doc.querySelector("#storage-notice").textContent.includes("could not be saved"), "Write failure warning missing");
+      });
+
+      await test("Failed clearing is reported when starting over", async () => {
+        let doc = await openQuiz();
+        click(doc, ".answer:nth-child(2)");
+        doc = await openQuiz(`const realStorage = window.localStorage;
+          Object.defineProperty(window, "localStorage", { value: {
+            getItem: realStorage.getItem.bind(realStorage),
+            setItem: realStorage.setItem.bind(realStorage),
+            removeItem() { throw new Error("blocked"); }
+          } });`);
+        click(doc, "#start-over");
+        assert(!doc.querySelector("#quiz").hidden && !doc.querySelector(".answer").disabled, "Clear failure prevented restarting");
+        assert(doc.querySelector("#storage-notice").textContent.includes("could not be cleared"), "Clear failure warning missing");
+      });
+
+      if (frame) frame.remove();
+      if (originalProgress === null) localStorage.removeItem(key);
+      else localStorage.setItem(key, originalProgress);
+      document.querySelector("#summary").textContent = failures ? `${failures} test(s) failed` : "All tests passed";
+      document.title = failures ? "Tests failed" : "Tests passed";
+    }
+    runTests().catch((error) => {
+      if (frame) frame.remove();
+      if (originalProgress === null) localStorage.removeItem(key);
+      else localStorage.setItem(key, originalProgress);
+      document.querySelector("#summary").textContent = `Test harness failed: ${error.message}`;
+      document.title = "Tests failed";
+    });
+  </script>
+</body>
+</html>
